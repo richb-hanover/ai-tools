@@ -1,0 +1,1044 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF to Excel</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6677;
+    --border: #c9cfda; --accent: #1f7a4d; --accent-soft: #e3f3ea; --err: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #15181e; --panel: #1d2129; --text: #e6e9ef; --muted: #9aa3b2;
+      --border: #3a4150; --accent: #4cc38a; --accent-soft: #1c3529; --err: #ff8a80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 40px 16px; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 24px; color: var(--muted); }
+  #drop {
+    border: 2px dashed var(--border); border-radius: 14px; background: var(--panel);
+    padding: 56px 20px; text-align: center; cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  #drop:hover, #drop:focus-visible { border-color: var(--accent); outline: none; }
+  #drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  #drop .big { font-size: 18px; font-weight: 600; }
+  #drop .small { color: var(--muted); margin-top: 6px; }
+  #drop svg { width: 44px; height: 44px; color: var(--accent); margin-bottom: 10px; }
+  #log {
+    margin-top: 20px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 14px; min-height: 48px;
+    font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;
+    max-height: 340px; overflow: auto;
+  }
+  #log:empty::before { content: "Status messages will appear here."; color: var(--muted); }
+  .ok { color: var(--accent); font-weight: 600; }
+  .err { color: var(--err); font-weight: 600; }
+  .notes { margin-top: 20px; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>PDF → Excel</h1>
+  <p class="sub">Drop a PDF to convert it to an .xlsx that follows the PDF's layout. <b>Everything runs in this browser;</b> the file never leaves your computer.</p>
+
+  <div id="drop" tabindex="0" role="button" aria-label="Drop a PDF here or click to choose one">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M12 11v6"/><path d="m9 14 3 3 3-3"/>
+    </svg>
+    <div class="big">Drop a PDF here</div>
+    <div class="small">or click to choose a file. Several PDFs at once is fine.</div>
+    <input id="file" type="file" accept="application/pdf,.pdf" multiple hidden>
+  </div>
+
+  <div id="log" aria-live="polite"></div>
+
+  <p class="notes">
+    The result downloads as <em>&lt;original name&gt;.pdf.xlsx</em> to your browser's download folder (normally Downloads).
+    All pages are stacked onto one sheet; repeated page headers and footers are dropped.
+    Dollar amounts and percentages become real numbers. Pages without a text layer (scans) are run through OCR, which is slower and less exact.
+  </p>
+</main>
+
+<script id="core">
+// CORE-START  (pure conversion logic; also exercised by a Node test harness)
+"use strict";
+
+// ---------- value parsing ----------
+const MONEY_RE = /^(\()?\s*(-)?\s*\$\s*(-)?\s*(\d{1,3}(?:,\d{3})+|\d+)?(\.\d+)?\s*(\))?$/;
+const PCT_RE   = /^(\()?\s*(-)?\s*(\d{1,3}(?:,\d{3})+|\d+)?(\.\d+)?\s*%\s*(\))?$/;
+const NUM_RE   = /^(\()?(-)?([1-9]\d{0,2}(?:,\d{3})+(?:\.\d+)?|(?:0|[1-9]\d*)\.\d+)(\))?$/;
+
+function parseValue(text) {
+  const t = text.trim();
+  let m = t.match(MONEY_RE);
+  if (m && (m[4] || m[5])) {
+    const dec = m[5] ? m[5].length - 1 : 0;
+    const v = parseFloat((m[4] || "0").replace(/,/g, "") + (m[5] || ""));
+    const neg = (m[1] && m[6]) || m[2] || m[3];
+    const f = '"$"#,##0' + (dec ? "." + "0".repeat(dec) : "");
+    return { value: neg ? -v : v, numFmt: f + "_);(" + f + ")", kind: "money" };
+  }
+  m = t.match(PCT_RE);
+  if (m && (m[3] || m[4])) {
+    const dec = m[4] ? m[4].length - 1 : 0;
+    const v = +(parseFloat((m[3] || "0").replace(/,/g, "") + (m[4] || "")) / 100).toFixed(dec + 2);
+    const neg = (m[1] && m[5]) || m[2];
+    const f = "0" + (dec ? "." + "0".repeat(dec) : "") + "%";
+    return { value: neg ? -v : v, numFmt: m[1] && m[5] ? f + ";(" + f + ")" : f, kind: "pct" };
+  }
+  m = t.match(NUM_RE);
+  if (m) {
+    const dec = (m[3].split(".")[1] || "").length;
+    const v = parseFloat(m[3].replace(/,/g, ""));
+    const neg = (m[1] && m[4]) || m[2];
+    const f = (m[3].includes(",") ? "#,##0" : "0") + (dec ? "." + "0".repeat(dec) : "");
+    return { value: neg ? -v : v, numFmt: m[1] && m[4] ? f + "_);(" + f + ")" : f, kind: "num" };
+  }
+  return null;
+}
+const isValue = t => parseValue(t) !== null;
+
+// ---------- font info (bold / family) ----------
+function readFontNames(bytes) {
+  const out = {};
+  try {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const numTables = dv.getUint16(4);
+    for (let i = 0; i < numTables; i++) {
+      const rec = 12 + 16 * i;
+      const tag = String.fromCharCode(bytes[rec], bytes[rec + 1], bytes[rec + 2], bytes[rec + 3]);
+      if (tag !== "name") continue;
+      const off = dv.getUint32(rec + 8);
+      const count = dv.getUint16(off + 2);
+      const strBase = off + dv.getUint16(off + 4);
+      for (let j = 0; j < count; j++) {
+        const r = off + 6 + 12 * j;
+        const pid = dv.getUint16(r), nid = dv.getUint16(r + 6), len = dv.getUint16(r + 8), so = dv.getUint16(r + 10);
+        if (![1, 2, 4, 6].includes(nid) || out[nid]) continue;
+        let s = "";
+        const p = strBase + so;
+        if (pid === 0 || pid === 3) { for (let k = 0; k + 1 < len; k += 2) s += String.fromCharCode(dv.getUint16(p + k)); }
+        else { for (let k = 0; k < len; k++) s += String.fromCharCode(bytes[p + k]); }
+        out[nid] = s;
+      }
+    }
+  } catch (e) { /* not a parsable sfnt; fine */ }
+  return out;
+}
+
+function fontFor(page, fontName, style, cache) {
+  if (cache.has(fontName)) return cache.get(fontName);
+  let fo = null;
+  try { fo = page.commonObjs.get(fontName); } catch (e) { /* not loaded */ }
+  let names = "";
+  let bold = false, italic = false;
+  if (fo) {
+    names = fo.name || "";
+    if (fo.data && fo.data.length) {
+      const n = readFontNames(fo.data);
+      names += " " + [n[1], n[2], n[4], n[6]].filter(Boolean).join(" ");
+    }
+    bold = !!fo.bold || !!fo.black;
+    italic = !!fo.italic;
+  }
+  if (/bold|black|heavy|semibold|demi/i.test(names)) bold = true;
+  if (/italic|oblique/i.test(names)) italic = true;
+  let family;
+  if (/times/i.test(names)) family = "Times New Roman";
+  else if (/arial|helvetica|arimo|liberation ?sans/i.test(names)) family = "Arial";
+  else if (/courier/i.test(names)) family = "Courier New";
+  else if (/calibri|carlito/i.test(names)) family = "Calibri";
+  else if (/cambria/i.test(names)) family = "Cambria";
+  else if (/verdana/i.test(names)) family = "Verdana";
+  else if (/tahoma/i.test(names)) family = "Tahoma";
+  else if (/georgia/i.test(names)) family = "Georgia";
+  else if (style && style.fontFamily === "serif") family = "Times New Roman";
+  else if (style && style.fontFamily === "monospace") family = "Courier New";
+  else family = "Arial";
+  const info = { bold, italic, family };
+  cache.set(fontName, info);
+  return info;
+}
+
+// ---------- extraction ----------
+// Split a text item that contains wide internal gaps (3+ spaces) into separate chunks.
+function splitWide(ch) {
+  const t = ch.text;
+  const cw = (ch.x1 - ch.x0) / Math.max(1, t.length);
+  if (!/\S\s{3,}\S/.test(t)) { // trim, moving the edges past any leading/trailing spaces
+    const lead = t.length - t.trimStart().length, trail = t.length - t.trimEnd().length;
+    return [{ ...ch, text: t.trim(), x0: ch.x0 + lead * cw, x1: ch.x1 - trail * cw }];
+  }
+  const out = [];
+  const re = /\S+(?:\s{1,2}\S+)*/g;
+  let m;
+  while ((m = re.exec(t))) {
+    out.push({ ...ch, text: m[0], x0: ch.x0 + m.index * cw, x1: ch.x0 + (m.index + m[0].length) * cw });
+  }
+  return out;
+}
+
+async function extractPages(pdfjsLib, data, opts = {}) {
+  const log = opts.log || (() => {});
+  const doc = await pdfjsLib.getDocument({ data, fontExtraProperties: true, isEvalSupported: false }).promise;
+  const pages = [];
+  const fontCache = new Map();
+  let ocrCount = 0;
+  for (let p = 1; p <= doc.numPages; p++) {
+    log(`Reading page ${p} of ${doc.numPages}…`);
+    const page = await doc.getPage(p);
+    const vp = page.getViewport({ scale: 1 });
+    const tc = await page.getTextContent();
+    const textChars = tc.items.reduce((n, it) => n + (it.str ? it.str.replace(/\s/g, "").length : 0), 0);
+    let items = [];
+    let graphics = null;
+    if (textChars < 5) {
+      if (opts.ocrPage) {
+        log(`Page ${p} has no text layer, so running OCR (this can take a while)…`);
+        items = await opts.ocrPage(page, vp);
+        ocrCount++;
+      } else {
+        log(`Page ${p} has no text layer and OCR is unavailable; skipped.`);
+      }
+    } else {
+      try {
+        const opList = await page.getOperatorList(); // also loads fonts, needed for bold detection
+        graphics = extractGraphics(opList, pdfjsLib.OPS, vp);
+      } catch (e) { /* fonts/graphics unavailable; bold, fills and merges degrade */ }
+      for (const it of tc.items) {
+        if (!it.str || !it.str.trim()) continue;
+        const f = fontFor(page, it.fontName, tc.styles[it.fontName], fontCache);
+        const [a, b, c, d, e, ff] = it.transform;
+        const size = Math.hypot(c, d) || Math.hypot(a, b) || 10;
+        const dl = Math.hypot(a, b) || 1;
+        const p0 = vp.convertToViewportPoint(e, ff);
+        const p1 = vp.convertToViewportPoint(e + it.width * a / dl, ff + it.width * b / dl);
+        const ch = {
+          text: it.str, x0: Math.min(p0[0], p1[0]), x1: Math.max(p0[0], p1[0]), y: p0[1],
+          size, bold: f.bold, italic: f.italic, font: f.family,
+          color: graphics ? textColorAt(graphics.textRuns, Math.min(p0[0], p1[0]), p0[1]) : null,
+        };
+        if (ch.x1 - ch.x0 < 0.5) ch.x1 = ch.x0 + size * 0.5 * it.str.length;
+        items.push(...splitWide(ch));
+      }
+    }
+    const lines = applyCellBoxes(groupLines(items), graphics, vp);
+    pages.push({
+      width: vp.width, height: vp.height, lines,
+      fills: graphics ? graphics.fills : [], vRules: graphics ? graphics.v.filter(r => r.y1 - r.y0 >= 8) : [],
+    });
+    page.cleanup();
+  }
+  await doc.destroy();
+  return { pages, ocrCount };
+}
+
+// ---------- graphics: filled boxes (cell backgrounds) and ruling lines ----------
+// Walks the page's drawing operations and returns, in top-down page coordinates:
+//   fills: [{x0,y0,x1,y1,color:"rrggbb"}] in paint order (later = on top)
+//   h / v: horizontal and vertical ruling lines (from thin filled rects or stroked segments)
+function extractGraphics(opList, OPS, vp) {
+  const fills = [], h = [], v = [];
+  const textRuns = []; // {x0, x1, y, color} for each text-showing operation
+  let tm = [1, 0, 0, 1, 0, 0], tlm = tm, fontSize = 10, charSp = 0, wordSp = 0, hScale = 1, leading = 0;
+  const moveText = (tx, ty) => { tlm = [tlm[0], tlm[1], tlm[2], tlm[3], tlm[0] * tx + tlm[2] * ty + tlm[4], tlm[1] * tx + tlm[3] * ty + tlm[5]]; tm = tlm; };
+  const showText = glyphs => {
+    let adv = 0;
+    for (const g of glyphs || []) {
+      if (typeof g === "number") adv -= g * fontSize / 1000;
+      else if (g) adv += ((g.width || 0) * fontSize / 1000 + charSp + (g.isSpace ? wordSp : 0)) * hScale;
+    }
+    const a = pt(tm[4], tm[5]), b = pt(tm[0] * adv + tm[4], tm[1] * adv + tm[5]);
+    textRuns.push({ x0: Math.min(a[0], b[0]), x1: Math.max(a[0], b[0]), y: a[1], color: st.fill });
+    tm = [tm[0], tm[1], tm[2], tm[3], tm[0] * adv + tm[4], tm[1] * adv + tm[5]];
+  };
+  const mul = (m, n) => [
+    m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1],
+    m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3],
+    m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
+  const hex = c => c ? [0, 1, 2].map(k => Math.round(c[k]).toString(16).padStart(2, "0")).join("") : null;
+  let st = { ctm: [1, 0, 0, 1, 0, 0], fill: "000000", stroke: "000000" };
+  const stack = [];
+  let subs = null;
+  const pt = (x, y) => {
+    const m = st.ctm;
+    return vp.convertToViewportPoint(m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]);
+  };
+  const build = ([ops, nums]) => {
+    const out = [];
+    let cur = null, j = 0;
+    const need = () => { if (!cur) { cur = { pts: [] }; out.push(cur); } };
+    for (const op of ops) {
+      if (op === OPS.rectangle) {
+        const [x, y, w, hh] = nums.slice(j, j + 4); j += 4;
+        out.push({ pts: [pt(x, y), pt(x + w, y), pt(x + w, y + hh), pt(x, y + hh)], closed: true });
+        cur = null;
+      } else if (op === OPS.moveTo) { cur = { pts: [pt(nums[j], nums[j + 1])] }; out.push(cur); j += 2; }
+      else if (op === OPS.lineTo) { need(); cur.pts.push(pt(nums[j], nums[j + 1])); j += 2; }
+      else if (op === OPS.curveTo) { need(); cur.curved = true; cur.pts.push(pt(nums[j + 4], nums[j + 5])); j += 6; }
+      else if (op === OPS.curveTo2 || op === OPS.curveTo3) { need(); cur.curved = true; cur.pts.push(pt(nums[j + 2], nums[j + 3])); j += 4; }
+      else if (op === OPS.closePath) { if (cur) cur.closed = true; }
+    }
+    return out;
+  };
+  const paint = (doFill, doStroke) => {
+    if (!subs) return;
+    for (const s of subs) {
+      if (s.curved || s.pts.length < 2) continue;
+      const xs = s.pts.map(p => p[0]), ys = s.pts.map(p => p[1]);
+      const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+      if (doFill && st.fill && s.pts.length >= 3) {
+        const axis = s.pts.every(p => (Math.abs(p[0] - x0) < 0.6 || Math.abs(p[0] - x1) < 0.6) &&
+                                      (Math.abs(p[1] - y0) < 0.6 || Math.abs(p[1] - y1) < 0.6));
+        if (axis) {
+          const w = x1 - x0, hh = y1 - y0;
+          if (Math.min(w, hh) <= 2.5) {
+            if (w >= hh && w > 3) h.push({ y: (y0 + y1) / 2, x0, x1 });
+            else if (hh > w && hh > 3) v.push({ x: (x0 + x1) / 2, y0, y1 });
+          } else fills.push({ x0, y0, x1, y1, color: st.fill });
+        }
+      }
+      if (doStroke) {
+        const pts = s.closed ? [...s.pts, s.pts[0]] : s.pts;
+        for (let k = 1; k < pts.length; k++) {
+          const [ax, ay] = pts[k - 1], [bx, by] = pts[k];
+          if (Math.abs(ay - by) < 0.6 && Math.abs(ax - bx) > 3) h.push({ y: (ay + by) / 2, x0: Math.min(ax, bx), x1: Math.max(ax, bx) });
+          else if (Math.abs(ax - bx) < 0.6 && Math.abs(ay - by) > 3) v.push({ x: (ax + bx) / 2, y0: Math.min(ay, by), y1: Math.max(ay, by) });
+        }
+      }
+    }
+    subs = null;
+  };
+  const { fnArray, argsArray } = opList;
+  for (let i = 0; i < fnArray.length; i++) {
+    const fn = fnArray[i], a = argsArray[i];
+    switch (fn) {
+      case OPS.save: stack.push(st); st = { ...st }; break;
+      case OPS.restore: if (stack.length) st = stack.pop(); break;
+      case OPS.transform: st.ctm = mul(st.ctm, a); break;
+      case OPS.paintFormXObjectBegin: stack.push(st); st = { ...st }; if (a && a[0]) st.ctm = mul(st.ctm, a[0]); break;
+      case OPS.paintFormXObjectEnd: if (stack.length) st = stack.pop(); break;
+      case OPS.setFillRGBColor: st.fill = hex(a); break;
+      case OPS.setStrokeRGBColor: st.stroke = hex(a); break;
+      case OPS.setFillColorN: st.fill = null; break; // pattern/gradient fill: colour unknown
+      case OPS.constructPath: subs = build(a); break;
+      case OPS.fill: case OPS.eoFill: paint(true, false); break;
+      case OPS.stroke: case OPS.closeStroke: paint(false, true); break;
+      case OPS.fillStroke: case OPS.eoFillStroke: case OPS.closeFillStroke: case OPS.closeEOFillStroke: paint(true, true); break;
+      case OPS.endPath: subs = null; break;
+      // text state, tracked only to learn which colour each piece of text is drawn in
+      case OPS.beginText: tm = tlm = [1, 0, 0, 1, 0, 0]; break;
+      case OPS.setFont: fontSize = a[1] || fontSize; break;
+      case OPS.setTextMatrix: tm = tlm = Array.from(a).slice(0, 6); break;
+      case OPS.moveText: moveText(a[0], a[1]); break;
+      case OPS.setLeadingMoveText: leading = -a[1]; moveText(a[0], a[1]); break;
+      case OPS.setLeading: leading = a[0]; break;
+      case OPS.nextLine: moveText(0, -leading); break;
+      case OPS.setCharSpacing: charSp = a[0]; break;
+      case OPS.setWordSpacing: wordSp = a[0]; break;
+      case OPS.setHScale: hScale = a[0] / 100; break;
+      case OPS.showText: case OPS.showSpacedText: showText(a[0]); break;
+      case OPS.nextLineShowText: moveText(0, -leading); showText(a[0]); break;
+      case OPS.nextLineSetSpacingShowText: wordSp = a[0]; charSp = a[1]; moveText(0, -leading); showText(a[2]); break;
+    }
+  }
+  // A fill covering most of the page is a page background, not a cell.
+  const pageArea = vp.width * vp.height;
+  return { fills: fills.filter(f => (f.x1 - f.x0) * (f.y1 - f.y0) < 0.6 * pageArea), h, v, textRuns };
+}
+
+// Colour of the text that starts at (x, y): the text run drawn there.
+function textColorAt(runs, x, y) {
+  let best = null, bd = Infinity;
+  for (const r of runs) {
+    if (Math.abs(r.y - y) > 1.5 || x < r.x0 - 2 || x > r.x1 + 0.5) continue;
+    const d = Math.abs(r.x0 - x);
+    if (d < bd) { bd = d; best = r; }
+  }
+  return best ? best.color : null;
+}
+
+const isWhite = hex => !hex || parseInt(hex.slice(0, 2), 16) + parseInt(hex.slice(2, 4), 16) + parseInt(hex.slice(4, 6), 16) >= 3 * 248;
+
+// Topmost fill colour at a point (null when the point is unfilled or white).
+function fillAt(fills, x, y) {
+  for (let i = fills.length - 1; i >= 0; i--) {
+    const f = fills[i];
+    if (x >= f.x0 && x <= f.x1 && y >= f.y0 && y <= f.y1) return isWhite(f.color) ? null : f.color;
+  }
+  return null;
+}
+
+// The PDF table cell around a point: the nearest ruling line on each of the four sides,
+// or failing that the smallest coloured box containing it.
+function cellBoxAt(g, x, y, pageArea) {
+  const tol = 1.5;
+  let top = -Infinity, bottom = Infinity, left = -Infinity, right = Infinity;
+  for (const r of g.h) {
+    if (x < r.x0 - tol || x > r.x1 + tol) continue;
+    if (r.y < y && r.y > top) top = r.y;
+    if (r.y > y && r.y < bottom) bottom = r.y;
+  }
+  for (const r of g.v) {
+    if (y < r.y0 - tol || y > r.y1 + tol) continue;
+    if (r.x < x && r.x > left) left = r.x;
+    if (r.x > x && r.x < right) right = r.x;
+  }
+  let box = null;
+  if (isFinite(top) && isFinite(bottom) && isFinite(left) && isFinite(right)) box = { x0: left, x1: right, y0: top, y1: bottom };
+  else {
+    for (const f of g.fills) {
+      if (isWhite(f.color) || x < f.x0 || x > f.x1 || y < f.y0 || y > f.y1) continue;
+      if (!box || (f.x1 - f.x0) * (f.y1 - f.y0) < (box.x1 - box.x0) * (box.y1 - box.y0)) box = { x0: f.x0, x1: f.x1, y0: f.y0, y1: f.y1 };
+    }
+  }
+  if (box && (box.x1 - box.x0) * (box.y1 - box.y0) > 0.5 * pageArea) box = null; // page frame, not a cell
+  return box;
+}
+
+// Use the PDF's cell boxes to (a) join text that wraps inside one cell and
+// (b) mark text whose cell spans several lines, so the grid can merge cells.
+function applyCellBoxes(lines, g, vp) {
+  if (!g || (!g.fills.length && !(g.h.length && g.v.length))) return lines;
+  const pageArea = vp.width * vp.height;
+  const groups = new Map();
+  for (const l of lines) for (const c of l.chunks) {
+    const box = cellBoxAt(g, (c.x0 + c.x1) / 2, c.y - 0.35 * c.size, pageArea);
+    if (!box || box.x1 - box.x0 < (c.x1 - c.x0) - 2) continue;
+    const key = [box.x0, box.x1, box.y0, box.y1].map(n => n.toFixed(1)).join(",");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ c, l, box });
+  }
+  for (const grp of groups.values()) {
+    // A real cell holds at most one phrase per line; otherwise it is a band/row/frame.
+    const perLine = new Map();
+    grp.forEach(({ l }) => perLine.set(l, (perLine.get(l) || 0) + 1));
+    if ([...perLine.values()].some(n => n > 1)) continue;
+    grp.sort((a, b) => a.l.y - b.l.y);
+    const anchor = grp[0].c;
+    anchor.box = grp[0].box;
+    if (grp.length > 1) { // text wrapped within one cell -> one multi-line cell
+      anchor.text = grp.map(x => x.c.text).join("\n");
+      anchor.x0 = Math.min(...grp.map(x => x.c.x0));
+      anchor.x1 = Math.max(...grp.map(x => x.c.x1));
+      anchor.wrap = true;
+      for (const { c, l } of grp.slice(1)) l.chunks = l.chunks.filter(k => k !== c);
+    }
+  }
+  lines = lines.filter(l => l.chunks.length);
+  // A line made only of labels from cells that span other lines (e.g. a label centred
+  // between two rows) is folded into the first line its cell covers.
+  for (const l of [...lines]) {
+    const covered = c => c.box && lines.filter(o => o !== l && o.chunks.length && o.y >= c.box.y0 && o.y <= c.box.y1);
+    if (!l.chunks.every(c => c.box && covered(c).length)) continue;
+    for (const c of l.chunks) {
+      const target = covered(c)[0];
+      target.chunks.push(c);
+      target.chunks.sort((a, b) => a.x0 - b.x0);
+      target.size = Math.max(target.size, c.size);
+    }
+    l.chunks = [];
+  }
+  return lines.filter(l => l.chunks.length);
+}
+
+// Group chunks into visual lines and join fragments that belong to the same phrase.
+function groupLines(items) {
+  items = items.filter(i => i.text && i.text.trim()).sort((a, b) => a.y - b.y || a.x0 - b.x0);
+  const lines = [];
+  for (const it of items) {
+    const tol = Math.max(1.5, 0.35 * it.size);
+    let line = null;
+    for (let k = lines.length - 1; k >= 0 && k >= lines.length - 3; k--) {
+      if (Math.abs(lines[k].y - it.y) <= tol) { line = lines[k]; break; }
+    }
+    if (!line) { line = { y: it.y, chunks: [] }; lines.push(line); }
+    line.chunks.push(it);
+  }
+  for (const line of lines) {
+    line.chunks.sort((a, b) => a.x0 - b.x0);
+    const merged = [];
+    for (const c of line.chunks) {
+      const prev = merged[merged.length - 1];
+      if (prev) {
+        const gap = c.x0 - prev.x1;
+        const sz = Math.max(prev.size, c.size);
+        const lonePrefix = /^\(?-?\$$/.test(prev.text.trim()) && /^[\d(.,]/.test(c.text.trim()) && gap < 12 * sz;
+        const close = gap < 0.45 * sz && prev.bold === c.bold && prev.color === c.color && !(isValue(prev.text) && isValue(c.text));
+        if (lonePrefix || close) {
+          const sp = lonePrefix || gap < 0.12 * sz || /\s$/.test(prev.text) || /^\s/.test(c.text) ? "" : " ";
+          prev.text = (prev.text + sp + c.text).replace(/\s+/g, " ").trim();
+          prev.x1 = Math.max(prev.x1, c.x1);
+          prev.size = sz;
+          continue;
+        }
+      }
+      merged.push({ ...c, text: c.text.replace(/\s+/g, " ").trim() });
+    }
+    line.chunks = merged;
+    line.size = Math.max(...merged.map(c => c.size));
+  }
+  return lines;
+}
+
+// ---------- layout: pages -> grid ----------
+function median(a) {
+  if (!a.length) return 0;
+  const s = [...a].sort((x, y) => x - y);
+  return s[Math.floor(s.length / 2)];
+}
+
+function buildGrid(pages) {
+  // 1. Drop repeated page headers (keep page 1's) and repeated footers (all pages).
+  const sig = l => l.chunks.map(c => c.text.toLowerCase().replace(/\d+/g, "#").replace(/\s+/g, " ")).join("|");
+  const letters = s => /[a-z]{3}/.test(s);
+  pages.forEach(pg => pg.lines.forEach((l, i) => {
+    l.sig = sig(l);
+    l.top = l.y < pg.height * 0.25 && i < 8;
+    l.bottom = l.y > pg.height * 0.85 && i >= pg.lines.length - 3;
+  }));
+  let droppedHeaders = 0, droppedFooters = 0;
+  if (pages.length > 1) {
+    const bottomPages = new Map();
+    pages.forEach(pg => new Set(pg.lines.filter(l => l.bottom).map(l => l.sig))
+      .forEach(s => bottomPages.set(s, (bottomPages.get(s) || 0) + 1)));
+    const topSeen = new Set();
+    pages.forEach((pg, i) => {
+      for (const l of pg.lines) {
+        if (!letters(l.sig)) continue;
+        if (l.bottom && bottomPages.get(l.sig) >= 2) { l.drop = true; droppedFooters++; }
+        else if (l.top && i > 0 && topSeen.has(l.sig)) { l.drop = true; droppedHeaders++; }
+      }
+      pg.lines.filter(l => l.top).forEach(l => topSeen.add(l.sig));
+    });
+  }
+
+  // 2. Stack pages into one list of rows; keep big vertical gaps as blank rows.
+  const rows = [];
+  const rowGeo = []; // where each sheet row sits on its PDF page
+  const lineText = l => l.chunks.map(c => c.text).join("\u0001");
+  let lastLine = null;
+  pages.forEach((pg, pi) => {
+    if (pages.length > 1) { // "Page N" marker row at the start of each page
+      rows.push({ pageMarker: pi + 1, chunks: [], size: 12 });
+      rowGeo.push({ page: pi, y: -1e9, size: 12 });
+    }
+    const kept = pg.lines.filter(l => !l.drop);
+    const gaps = [];
+    for (let i = 1; i < kept.length; i++) gaps.push(kept[i].y - kept[i - 1].y);
+    const med = median(gaps) || 12;
+    kept.forEach((l, i) => {
+      if (i === 0 && lastLine && lineText(l) === lineText(lastLine)) return; // row repeated across a page break
+      if (i > 0 && kept[i].y - kept[i - 1].y > 1.75 * med) {
+        rows.push(null);
+        rowGeo.push({ page: pi, y: (kept[i].y + kept[i - 1].y) / 2, size: 10 });
+      }
+      rows.push(l);
+      rowGeo.push({ page: pi, y: l.y, size: l.size });
+    });
+    if (kept.length) lastLine = kept[kept.length - 1];
+  });
+  while (rows.length && rows[rows.length - 1] === null) { rows.pop(); rowGeo.pop(); }
+
+  // 3. Find columns from the horizontal coverage of all chunks.
+  const chunks = rows.filter(Boolean).flatMap(r => r.chunks);
+  if (!chunks.length) return { rows: [], columns: [], droppedHeaders, droppedFooters };
+  const runsFrom = (list, t) => {
+    const maxX = Math.ceil(Math.max(...list.map(c => c.x1))) + 2;
+    const cov = new Int32Array(maxX + 1);
+    for (const c of list) for (let b = Math.max(0, Math.round(c.x0)); b < Math.round(c.x1); b++) cov[b]++;
+    const runs = [];
+    let s = -1;
+    for (let b = 0; b <= maxX; b++) {
+      if (cov[b] > t && s < 0) s = b;
+      if ((cov[b] <= t || b === maxX) && s >= 0) { runs.push({ start: s, end: b }); s = -1; }
+    }
+    return runs;
+  };
+  const overlap = (c, r) => Math.min(c.x1, r.end) - Math.max(c.x0, r.start);
+  const nRows = rows.filter(Boolean).length;
+  let columns = runsFrom(chunks, Math.max(1, Math.round(0.03 * nRows)));
+  const leftovers = chunks.filter(c => !columns.some(r => overlap(c, r) > 0));
+  if (leftovers.length) columns = columns.concat(runsFrom(leftovers, 0));
+  columns.sort((a, b) => a.start - b.start);
+  if (!columns.length) columns = [{ start: 0, end: 1 }];
+
+  // Vertical ruling lines in the PDF are definite column boundaries: split any column
+  // that has text entirely on both sides of one.
+  const cuts = [...new Set(pages.flatMap(pg => (pg.vRules || []).map(r => Math.round(r.x))))].sort((a, b) => a - b);
+  for (const x of cuts) {
+    const i = columns.findIndex(col => x > col.start + 1 && x < col.end - 1);
+    if (i < 0) continue;
+    const col = columns[i];
+    const inCol = chunks.filter(c => overlap(c, col) > 0);
+    if (inCol.some(c => c.x1 <= x + 0.5) && inCol.some(c => c.x0 >= x - 0.5)) {
+      columns.splice(i, 1, { start: col.start, end: x }, { start: x, end: col.end });
+    }
+  }
+
+  // Split a column wherever two numbers keep landing in it on the same row
+  // (adjacent numeric columns whose gap was bridged, e.g. by padded OCR boxes).
+  const bestCol = c => {
+    let bi = -1, bo = 0;
+    columns.forEach((col, i) => { const o = overlap(c, col); if (o > bo) { bo = o; bi = i; } });
+    return bi;
+  };
+  for (let pass = 0; pass < 8; pass++) {
+    const splits = columns.map(() => []);
+    for (const r of rows) {
+      if (!r) continue;
+      const byCol = new Map();
+      for (const c of r.chunks) {
+        if (!isValue(c.text)) continue;
+        const i = bestCol(c);
+        if (i < 0) continue;
+        if (byCol.has(i)) splits[i].push((byCol.get(i).x1 + c.x0) / 2);
+        byCol.set(i, c);
+      }
+    }
+    const i = splits.findIndex(s => s.length >= 2);
+    if (i < 0) break;
+    const x = median(splits[i]);
+    const col = columns[i];
+    if (x <= col.start || x >= col.end) break;
+    columns.splice(i, 1, { start: col.start, end: x }, { start: x, end: col.end });
+  }
+
+  // 4. Place chunks into cells (twice: the first pass finds columns nothing lands in, which are removed).
+  const place = () => rows.map(r => {
+    if (!r) return null;
+    const cells = new Map();
+    const placed = [];
+    for (const c of r.chunks) {
+      const ov = columns.map((col, i) => ({ i, o: overlap(c, col) })).filter(x => x.o > 0);
+      let ci;
+      if (ov.length > 1 && !isValue(c.text) && c.x0 - columns[ov[0].i].start <= 4) ci = ov[0].i; // left-aligned text overflowing right
+      else if (ov.length) ci = ov.reduce((a, b) => (b.o > a.o ? b : a)).i;
+      else { // nearest column by center
+        const cx = (c.x0 + c.x1) / 2;
+        ci = columns.reduce((best, col, i) =>
+          Math.abs((col.start + col.end) / 2 - cx) < Math.abs((columns[best].start + columns[best].end) / 2 - cx) ? i : best, 0);
+      }
+      const existing = cells.get(ci);
+      if (existing) {
+        existing.text += " " + c.text;
+        existing.x1 = Math.max(existing.x1, c.x1);
+        existing.bold = existing.bold && c.bold;
+      } else {
+        const cell = { ...c, col: ci, span: ov.map(x => x.i) };
+        cells.set(ci, cell);
+        placed.push(cell);
+      }
+    }
+    // spanning text that is not left-aligned to its column -> merged & centered
+    for (const cell of placed) {
+      const col = columns[cell.col];
+      if (cell.box || cell.span.length < 2 || cell.x0 - col.start <= 4) continue; // boxed cells are merged in 4b
+      let lo = cell.col, hi = cell.col;
+      while (cell.span.includes(lo - 1) && !cells.has(lo - 1)) lo--;
+      while (cell.span.includes(hi + 1) && !cells.has(hi + 1)) hi++;
+      if (hi > lo) {
+        cells.delete(cell.col);
+        cell.col = lo; cell.mergeTo = hi;
+        cells.set(lo, cell);
+        for (let k = lo + 1; k <= hi; k++) cells.set(k, { reserved: true });
+      }
+    }
+    return { size: r.size, cells };
+  });
+  let grid = place();
+  const used = new Set();
+  grid.forEach(g => g && g.cells.forEach((c, i) => { if (!c.reserved) used.add(i); }));
+  if (used.size < columns.length) {
+    columns = columns.filter((_, i) => used.has(i));
+    grid = place();
+  }
+
+  // 4b. Merge cells whose PDF cell box spans several sheet rows and/or columns.
+  let mergedCells = 0;
+  grid.forEach((g, ri) => {
+    if (!g) return;
+    for (const [ci, cell] of [...g.cells]) {
+      if (cell.reserved || !cell.box) continue;
+      const b = cell.box, page = rowGeo[ri].page;
+      // vertical placement of the text inside its box
+      const nLines = cell.text.split("\n").length;
+      const tg = (cell.y - 0.8 * cell.size) - b.y0;
+      const bg = b.y1 - (cell.y + 0.2 * cell.size + (nLines - 1) * 1.2 * cell.size);
+      cell.valign = Math.abs(tg - bg) < 0.25 * (b.y1 - b.y0) ? "middle" : tg < bg ? "top" : "bottom";
+      if (cell.mergeTo !== undefined) continue;
+      let r0 = ri, r1 = ri, c0 = ci, c1 = ci;
+      rowGeo.forEach((geo, k) => {
+        if (geo.page === page && geo.y >= b.y0 - 1 && geo.y <= b.y1 + 1) { r0 = Math.min(r0, k); r1 = Math.max(r1, k); }
+      });
+      columns.forEach((col, k) => {
+        const cx = (col.start + col.end) / 2;
+        if (cx >= b.x0 && cx <= b.x1) { c0 = Math.min(c0, k); c1 = Math.max(c1, k); }
+      });
+      if (r0 === r1 && c0 === c1) continue;
+      let free = true;
+      for (let r = r0; r <= r1 && free; r++) for (let k = c0; k <= c1; k++) {
+        if ((r !== ri || k !== ci) && grid[r] && grid[r].cells.has(k)) { free = false; break; }
+      }
+      if (!free) continue;
+      g.cells.delete(ci);
+      for (let r = r0; r <= r1; r++) {
+        if (!grid[r]) grid[r] = { size: 0, cells: new Map() };
+        for (let k = c0; k <= c1; k++) grid[r].cells.set(k, { reserved: true });
+      }
+      const lg = cell.x0 - b.x0, rg = b.x1 - cell.x1;
+      cell.align = lg > 3 && Math.abs(lg - rg) < Math.max(4, 0.15 * (b.x1 - b.x0)) ? "center" : rg < lg ? "right" : "left";
+      cell.boxAlign = true;
+      cell.col = c0; cell.mergeTo = c1; cell.mergeRows = r1;
+      grid[r0].cells.set(c0, cell);
+      mergedCells++;
+    }
+  });
+
+  // 5. Alignment. Values: per-column majority (right vs centred). Text: by position in its column.
+  //    Edges are measured against the text in the column (a column may be bounded by a ruling line).
+  const textEdges = columns.map((col, i) => {
+    let lo = Infinity, hi = -Infinity;
+    for (const g of grid) {
+      const c = g && g.cells.get(i);
+      if (!c || c.reserved || c.mergeTo !== undefined) continue;
+      lo = Math.min(lo, c.x0); hi = Math.max(hi, c.x1);
+    }
+    return isFinite(lo) ? { start: Math.max(col.start, lo), end: Math.min(col.end, hi) } : col;
+  });
+  const colValueAlign = columns.map((_, i) => {
+    const col = textEdges[i];
+    let right = 0, center = 0;
+    for (const g of grid) {
+      const c = g && g.cells.get(i);
+      if (!c || c.reserved || c.mergeTo !== undefined || !isValue(c.text)) continue;
+      const lg = c.x0 - col.start, rg = col.end - c.x1;
+      if (rg <= 2) right++; else if (Math.abs(lg - rg) <= 4) center++;
+    }
+    return center > right ? "center" : "right";
+  });
+  const leftEdges = columns.map((_, i) => {
+    const m = new Map();
+    for (const g of grid) {
+      const c = g && g.cells.get(i);
+      if (!c || c.reserved || c.mergeTo !== undefined || isValue(c.text)) continue;
+      const k = Math.round(c.x0);
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(c.x1 - c.x0);
+    }
+    return m;
+  });
+  for (const g of grid) {
+    if (!g) continue;
+    for (const [i, c] of g.cells) {
+      if (c.reserved || c.boxAlign) continue;
+      if (c.mergeTo !== undefined) { c.align = "center"; continue; }
+      if (isValue(c.text)) { c.align = colValueAlign[i]; continue; }
+      const col = textEdges[i];
+      const lg = c.x0 - col.start, rg = col.end - c.x1;
+      // Text of differing widths sharing one left edge is left-aligned (possibly indented),
+      // even when it happens to fill its cell.
+      const k = Math.round(c.x0);
+      const widths = [k - 1, k, k + 1].flatMap(j => leftEdges[i].get(j) || []);
+      const sharedLeft = widths.length >= 3 && Math.max(...widths) - Math.min(...widths) > 6;
+      if (sharedLeft) c.align = "left";
+      else if (c.box) { // position inside the PDF cell
+        const lb = c.x0 - c.box.x0, rb = c.box.x1 - c.x1;
+        c.align = Math.abs(lb - rb) <= Math.max(3, 0.1 * (c.box.x1 - c.box.x0)) ? "center" : rb < lb ? "right" : "left";
+      } else c.align = lg <= 3 ? "left" : rg <= 3 ? "right" : Math.abs(lg - rg) <= 6 ? "center" : "left";
+      if (c.align === "left" && (c.box || sharedLeft)) {
+        const ref = c.box ? c.box.x0 + 2 : col.start;
+        const indent = Math.round((c.x0 - ref) / 7.5);
+        if (indent >= 1) c.indent = Math.min(indent, 15);
+      }
+    }
+  }
+
+  // Page marker rows: "Page N" in column A.
+  rows.forEach((r, ri) => {
+    if (!r || !r.pageMarker) return;
+    grid[ri].cells.set(0, { text: `Page ${r.pageMarker}`, x0: 0, x1: 0, y: 0, size: 12, bold: true, align: "left", pageMarker: true });
+  });
+
+  // 6. Background colours: sample the PDF's filled boxes under each cell.
+  let filledCells = 0;
+  grid.forEach((g, ri) => {
+    if (rows[ri] && rows[ri].pageMarker) { // light gray band across the whole marker row
+      g.fills = new Map(columns.map((_, ci) => [ci, "D9D9D9"]));
+      return;
+    }
+    const geo = rowGeo[ri];
+    const fills = pages[geo.page].fills;
+    if (!fills || !fills.length) return;
+    if (!g) g = grid[ri] = { size: 0, cells: new Map() };
+    g.fills = new Map();
+    columns.forEach((col, ci) => {
+      const c = g.cells.get(ci);
+      if (c && c.reserved) return;
+      const color = c
+        ? fillAt(fills, (c.x0 + c.x1) / 2, c.y - 0.35 * c.size)
+        : fillAt(fills, (col.start + col.end) / 2, geo.y - 0.35 * geo.size);
+      if (color) { g.fills.set(ci, color); filledCells++; }
+    });
+  });
+  return { rows: grid, columns, droppedHeaders, droppedFooters, mergedCells, filledCells };
+}
+
+// ---------- workbook ----------
+function sheetNameFrom(fileName) {
+  const base = fileName.replace(/\.pdf$/i, "").replace(/[\[\]:*?\/\\]/g, " ").trim() || "Sheet1";
+  return base.slice(0, 31);
+}
+
+const isDark = hex => {
+  const n = k => parseInt(hex.slice(k, k + 2), 16);
+  return (0.299 * n(0) + 0.587 * n(2) + 0.114 * n(4)) / 255 < 0.5;
+};
+
+const isBlack = hex => [0, 2, 4].every(k => parseInt(hex.slice(k, k + 2), 16) < 40);
+
+function buildWorkbook(ExcelJS, layout, fileName, landscape) {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = "PDF to Excel";
+  wb.created = new Date();
+  const ws = wb.addWorksheet(sheetNameFrom(fileName), {
+    pageSetup: {
+      orientation: landscape ? "landscape" : "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0,
+      margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.3, footer: 0.3 },
+    },
+  });
+  const nCols = layout.columns.length;
+  const contentW = new Array(nCols).fill(0);
+  layout.rows.forEach((r, ri) => {
+    const row = ws.getRow(ri + 1);
+    if (!r) return;
+    const fills = r.fills || new Map();
+    for (const [ci, hex] of fills) {
+      row.getCell(ci + 1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF" + hex.toUpperCase() } };
+    }
+    let height = 0;
+    for (const [ci, c] of r.cells) {
+      if (c.reserved) continue;
+      const cell = row.getCell(ci + 1);
+      const pv = parseValue(c.text);
+      const size = 12;
+      const lines = c.text.split("\n");
+      if (pv) { cell.value = pv.value; cell.numFmt = pv.numFmt; }
+      else cell.value = c.text;
+      const font = { name: "Calibri", size, bold: !!c.bold, italic: !!c.italic };
+      const bg = fills.get(ci);
+      if (c.color && !isBlack(c.color)) font.color = { argb: "FF" + c.color.toUpperCase() };
+      else if (!c.color && bg && isDark(bg)) font.color = { argb: "FFFFFFFF" }; // colour unknown (OCR): light on dark
+      cell.font = font;
+      cell.alignment = { horizontal: c.align || "left", vertical: c.valign || "bottom", wrapText: !!c.wrap };
+      if (c.indent) cell.alignment.indent = c.indent;
+      const spansRows = c.mergeRows !== undefined && c.mergeRows > ri;
+      if (c.mergeTo !== undefined || spansRows) {
+        ws.mergeCells(ri + 1, ci + 1, (c.mergeRows ?? ri) + 1, (c.mergeTo ?? ci) + 1);
+      } else {
+        const longest = Math.max(...lines.map(s => s.length));
+        contentW[ci] = Math.max(contentW[ci], longest * (size / 11) * 1.15 + 1);
+      }
+      height = Math.max(height, (spansRows ? 1 : lines.length) * size * 1.35);
+    }
+    if (height) row.height = Math.max(11, Math.round(height * 2) / 2);
+  });
+  layout.columns.forEach((col, i) => {
+    const geom = (col.end - col.start + 6) / 5.25;
+    ws.getColumn(i + 1).width = Math.min(80, Math.max(3, Math.max(geom, contentW[i]) + 0.5));
+  });
+  return wb;
+}
+
+async function convertPdf(arrayBuffer, fileName, deps) {
+  const { pdfjsLib, ExcelJS } = deps;
+  const log = deps.log || (() => {});
+  const { pages, ocrCount } = await extractPages(pdfjsLib, new Uint8Array(arrayBuffer), deps);
+  const layout = buildGrid(pages);
+  if (!layout.rows.length) throw new Error("No text could be found in this PDF.");
+  log(`Laid out ${layout.rows.length} rows × ${layout.columns.length} columns` +
+      (layout.droppedHeaders || layout.droppedFooters
+        ? ` (dropped ${layout.droppedHeaders} repeated header and ${layout.droppedFooters} footer lines)` : "") +
+      (layout.mergedCells ? `, ${layout.mergedCells} merged cells` : "") +
+      (layout.filledCells ? `, ${layout.filledCells} shaded cells` : "") + ".");
+  const landscape = pages.length && pages[0].width > pages[0].height;
+  const wb = buildWorkbook(ExcelJS, layout, fileName, landscape);
+  const buffer = await wb.xlsx.writeBuffer();
+  return { buffer, layout, pages: pages.length, ocrCount };
+}
+// CORE-END
+</script>
+
+<script>
+"use strict";
+pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+const TESSERACT_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+
+const drop = document.getElementById("drop");
+const input = document.getElementById("file");
+const logEl = document.getElementById("log");
+
+function log(msg, cls) {
+  const line = document.createElement("div");
+  if (cls) line.className = cls;
+  line.textContent = msg;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src; s.onload = resolve;
+    s.onerror = () => reject(new Error("Could not load " + src + " (are you online?)"));
+    document.head.appendChild(s);
+  });
+}
+
+// Whiten thin horizontal/vertical ruling lines in a rendered page so OCR doesn't read them as
+// "|" or "[" characters. Only thin lines are erased; solid dark fills (and the light text on
+// them) are left alone because a pixel a few rows/columns away is dark too.
+function eraseRules(ctx, w, h) {
+  const img = ctx.getImageData(0, 0, w, h), d = img.data;
+  const dark = new Uint8Array(w * h);
+  for (let i = 0, p = 0; i < dark.length; i++, p += 4) dark[i] = (d[p] * 0.299 + d[p + 1] * 0.587 + d[p + 2] * 0.114) < 140 ? 1 : 0;
+  const erase = new Uint8Array(w * h);
+  const MIN = 60, GAP = 5; // run length (px at 3x ≈ 20pt) and how far "outside the line" is
+  for (let y = 0; y < h; y++) { // horizontal runs
+    let s = -1;
+    for (let x = 0; x <= w; x++) {
+      const on = x < w && dark[y * w + x];
+      if (on && s < 0) s = x;
+      if (!on && s >= 0) {
+        if (x - s >= MIN) for (let k = s; k < x; k++) {
+          const up = y - GAP >= 0 && dark[(y - GAP) * w + k], dn = y + GAP < h && dark[(y + GAP) * w + k];
+          if (!(up && dn)) erase[y * w + k] = 1;
+        }
+        s = -1;
+      }
+    }
+  }
+  for (let x = 0; x < w; x++) { // vertical runs
+    let s = -1;
+    for (let y = 0; y <= h; y++) {
+      const on = y < h && dark[y * w + x];
+      if (on && s < 0) s = y;
+      if (!on && s >= 0) {
+        if (y - s >= MIN) for (let k = s; k < y; k++) {
+          const lf = x - GAP >= 0 && dark[k * w + x - GAP], rt = x + GAP < w && dark[k * w + x + GAP];
+          if (!(lf && rt)) erase[k * w + x] = 1;
+        }
+        s = -1;
+      }
+    }
+  }
+  for (let i = 0, p = 0; i < erase.length; i++, p += 4) if (erase[i]) d[p] = d[p + 1] = d[p + 2] = 255;
+  ctx.putImageData(img, 0, 0);
+}
+
+let tessWorker = null;
+async function ocrPage(page) {
+  if (typeof Tesseract === "undefined") await loadScript(TESSERACT_URL);
+  if (!tessWorker) tessWorker = await Tesseract.createWorker("eng");
+  const scale = 3;
+  const v = page.getViewport({ scale });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(v.width); canvas.height = Math.ceil(v.height);
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: ctx, viewport: v }).promise;
+  eraseRules(ctx, canvas.width, canvas.height);
+  const { data } = await tessWorker.recognize(canvas, {}, { blocks: true });
+  const items = [];
+  const lines = [];
+  for (const b of data.blocks || []) for (const par of b.paragraphs || []) for (const ln of par.lines || []) lines.push(ln);
+  for (const ln of lines) {
+    const h = (ln.bbox.y1 - ln.bbox.y0) / scale;
+    const base = ln.bbox.y1 / scale;
+    let prev = null;
+    for (const w of ln.words || []) {
+      if (!w.text || !w.text.trim() || w.confidence < 20) continue;
+      // Leftover grid lines read as | [ ] characters: drop them, and never join words across them.
+      const raw = w.text.trim();
+      if (/^[|\[\]{}]+$/.test(raw)) { prev = null; continue; }
+      const text = raw.replace(/^[|\[\]{}]+/, "").replace(/[|\[\]{}]+$/, "");
+      const ruledLeft = text !== raw && /^[|\[\]{}]/.test(raw), ruledRight = text !== raw && /[|\[\]{}]$/.test(raw);
+      const x0 = w.bbox.x0 / scale, x1 = w.bbox.x1 / scale;
+      // Join words of one OCR line into phrases, but never two numbers into one cell.
+      if (prev && !ruledLeft && x0 - prev.x1 < 0.6 * h && !(isValue(prev.text) && isValue(text))) {
+        prev.text += " " + text; prev.x1 = x1;
+      } else {
+        prev = { text, x0, x1, y: base, size: Math.max(6, h * 0.75), bold: false, italic: false, font: "Arial" };
+        items.push(prev);
+      }
+      if (ruledRight) prev = null;
+    }
+  }
+  canvas.width = canvas.height = 0;
+  return items;
+}
+
+function download(buffer, name) {
+  const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+let busy = Promise.resolve();
+function handleFiles(files) {
+  for (const file of files) {
+    busy = busy.then(() => convertOne(file));
+  }
+}
+
+async function convertOne(file) {
+  if (!/\.pdf$/i.test(file.name) && file.type !== "application/pdf") {
+    log(`✗ ${file.name}: not a PDF, skipped.`, "err");
+    return;
+  }
+  log(`— ${file.name}`);
+  try {
+    const buf = await file.arrayBuffer();
+    const t0 = performance.now();
+    const res = await convertPdf(buf, file.name, { pdfjsLib, ExcelJS, log, ocrPage });
+    const outName = file.name + ".xlsx";
+    download(res.buffer, outName);
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+    log(`✓ Saved ${outName} (${res.pages} page${res.pages === 1 ? "" : "s"}` +
+        (res.ocrCount ? `, ${res.ocrCount} via OCR. Check the OCR'd numbers` : "") + `, ${secs}s)`, "ok");
+  } catch (e) {
+    console.error(e);
+    log(`✗ ${file.name}: ${e.message || e}`, "err");
+  }
+}
+
+drop.addEventListener("click", () => input.click());
+drop.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } });
+input.addEventListener("change", () => { handleFiles([...input.files]); input.value = ""; });
+["dragenter", "dragover"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", e => handleFiles([...e.dataTransfer.files]));
+// Stop the browser from opening a PDF dropped slightly outside the zone.
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("drop", e => e.preventDefault());
+
+if (typeof pdfjsLib === "undefined" || typeof ExcelJS === "undefined") {
+  log("✗ Could not load the PDF/Excel libraries. This page needs an internet connection.", "err");
+}
+</script>
+</body>
+</html>
