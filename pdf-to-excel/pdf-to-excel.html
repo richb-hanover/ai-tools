@@ -53,7 +53,7 @@
 <body>
 <main>
   <h1>PDF → Excel</h1>
-  <p class="sub">Drop a PDF to convert it to an .xlsx that follows the PDF's layout. <b>Everything runs in this browser;</b> the file never leaves your computer.<span class="version"><em>Version 1.0.1</em></span></p>
+  <p class="sub">Drop a PDF to convert it to an .xlsx that follows the PDF's layout. <b>Everything runs in this browser;</b> the file never leaves your computer.<span class="version"><em>Version 1.0.2</em></span></p>
 
   <div id="drop" tabindex="0" role="button" aria-label="Drop a PDF here or click to choose one">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -83,7 +83,7 @@
 "use strict";
 
 // The one place the version lives: shown on the page and in each workbook's disclaimer row.
-const APP_VERSION = "1.0.1";
+const APP_VERSION = "1.0.2";
 const DISCLAIMER_URL = "https://richb-lyme.com/converting-pdfs-to-excel/";
 const DISCLAIMER = "Disclaimer: This automated conversion from PDF to Excel may have errors. " +
   `${DISCLAIMER_URL} (Version ${APP_VERSION})`;
@@ -530,7 +530,8 @@ function buildGrid(pages) {
     const topSeen = new Set();
     pages.forEach((pg, i) => {
       for (const l of pg.lines) {
-        if (!letters(l.sig)) continue;
+        // Headers/footers never carry amounts; lines with $ or % values are data (e.g. "Fund 21 Total:").
+        if (!letters(l.sig) || l.chunks.some(c => isValue(c.text) && /[$%]/.test(c.text))) continue;
         if (l.bottom && bottomPages.get(l.sig) >= 2) { l.drop = true; droppedFooters++; }
         else if (l.top && i > 0 && topSeen.has(l.sig)) { l.drop = true; droppedHeaders++; }
       }
@@ -569,7 +570,9 @@ function buildGrid(pages) {
   const chunks = rows.filter(Boolean).flatMap(r => r.chunks);
   if (!chunks.length) return { rows: [], columns: [], droppedHeaders, droppedFooters };
   const runsFrom = (list, t) => {
-    const maxX = Math.ceil(Math.max(...list.map(c => c.x1))) + 2;
+    let maxX = 0; // a loop, not Math.max(...list): huge documents exceed the argument limit
+    for (const c of list) if (c.x1 > maxX) maxX = c.x1;
+    maxX = Math.ceil(maxX) + 2;
     const cov = new Int32Array(maxX + 1);
     for (const c of list) for (let b = Math.max(0, Math.round(c.x0)); b < Math.round(c.x1); b++) cov[b]++;
     const runs = [];

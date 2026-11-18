@@ -66,6 +66,9 @@ work happens in the browser.
   whitens thin lines (not solid fills) before OCR, and stray bracket glyphs are stripped.
 - OCR word boxes are padded, so adjacent number columns touch. That's what the
   "two numbers in one column → split" pass is for.
+- Header/footer "signatures" replace digits with `#`, so different total rows can look identical.
+  Lines containing $ or % values are therefore never treated as headers/footers.
+- Don't use `Math.max(...array)` on per-chunk lists: it throws past roughly 100k elements.
 - ExcelJS reading back a default font reports `{theme: 1}` as its colour; that isn't white text.
 - Only the **top-left** cell of a merge carries the value and style.
 
@@ -113,3 +116,6 @@ after the change, dump again and `diff`. Every change in this tool was checked t
 7. Erase grid lines before OCR
 8. **Version 1.0.0**: version on the page, disclaimer text on the page and as the last workbook row (first public release)
 9. **Version 1.0.1**: disclaimer row is a clickable hyperlink to the blog post
+10. **Version 1.0.2**: code-review fixes: lines with $/% values are never dropped as headers/footers
+    (two pages ending in similar "Fund N Total:" rows used to lose both); no `Math.max(...hugeArray)`
+    in column detection (crashed on very large PDFs)
