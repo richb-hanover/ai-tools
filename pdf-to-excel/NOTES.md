@@ -23,7 +23,7 @@ work happens in the browser.
 | All cells **Calibri 12**; bold/italic and text colour kept from the PDF | User's choice (the PDF's own fonts/sizes were tried first). |
 | PDF borders **not** copied | User's choice: Excel gridlines do the job. Ruling lines are still *read*, to find cells and columns. |
 | Output name `name.pdf.xlsx` (not `name.xlsx`) | User's choice. |
-| Last row of every workbook: gray disclaimer with the blog link and version (`DISCLAIMER`) | User's choice. Plain text, no link styling. Added after column sizing so it doesn't widen column A. |
+| Last row of every workbook: gray disclaimer with the blog link and version (`DISCLAIMER`) | User's choice. The whole cell is a hyperlink to the blog post (Excel links are per cell), styled as plain text. Added after column sizing so it doesn't widen column A. |
 | Version kept in `APP_VERSION` (CORE) | One place to bump; the page label and the disclaimer row read it. |
 
 ## Pipeline (all inside `// CORE-START … // CORE-END` in the HTML)
@@ -112,3 +112,4 @@ after the change, dump again and `diff`. Every change in this tool was checked t
 6. "Page N" marker rows (light gray `#D9D9D9`) for multi-page PDFs
 7. Erase grid lines before OCR
 8. **Version 1.0.0**: version on the page, disclaimer text on the page and as the last workbook row (first public release)
+9. **Version 1.0.1**: disclaimer row is a clickable hyperlink to the blog post
