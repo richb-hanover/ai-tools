@@ -8,6 +8,16 @@ A collection of single-page browser tools. See README.md for the index.
 - Before changing an existing tool, read its NOTES.md; it records decisions the user made and gotchas.
 - After a meaningful change, update that tool's NOTES.md (decisions, gotchas, change history).
 
+## Versioning
+- Each tool shows its version on the page, italic and right-aligned on the last line of the intro
+  paragraph: `…intro text.<span class="version"><em>Version X.Y.Z</em></span></p>`, styled
+  `float: right; margin-left: 1em`. Start new tools at 1.0.0.
+- Keep the version in **one** JS constant (`APP_VERSION`, inside the CORE block) and fill the page
+  label and any output (e.g. a disclaimer line in generated files) from it.
+- After making a change to a tool, **ask the user whether to bump the version** (usually the
+  patch number, e.g. 1.0.0 → 1.0.1). Don't bump without asking. When bumped, add the version to
+  the change history in that tool's NOTES.md.
+
 ## How tools are built
 - **One self-contained HTML file** that works when opened from `file://`. No build step, no server.
 - Libraries from cdnjs (preferred) or jsDelivr, **pinned to exact versions**. UMD/classic-script
