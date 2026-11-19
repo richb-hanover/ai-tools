@@ -24,6 +24,7 @@ work happens in the browser.
 | PDF borders **not** copied | User's choice: Excel gridlines do the job. Ruling lines are still *read*, to find cells and columns. |
 | Output name `name.pdf.xlsx` (not `name.xlsx`) | User's choice. |
 | Last row of every workbook: gray disclaimer with the blog link and version (`DISCLAIMER`) | User's choice. The whole cell is a hyperlink to the blog post (Excel links are per cell), styled as plain text. Added after column sizing so it doesn't widen column A. |
+| No special cases for one document's quirks (e.g. Lyme's `180,130 cu` stays text) | User's choice: keep the converter general purpose. A value with a trailing note isn't a number. |
 | Version kept in `APP_VERSION` (CORE) | One place to bump; the page label and the disclaimer row read it. |
 
 ## Pipeline (all inside `// CORE-START … // CORE-END` in the HTML)
@@ -37,7 +38,8 @@ work happens in the browser.
    - stroked segments = ruling lines
    - text runs + fill colour = **text colour** (PDF.js text content has no colour)
 4. **groupLines**: items → visual lines (by baseline) → phrases (joined when the gap is < 0.45em;
-   never two numbers; a lone `$` joins the number after it).
+   never two numbers; a lone `$` joins the number after it; never across a **column start**,
+   i.e. an x where ≥ 5 chunks on the page begin and the text before it is usually *not* close).
 5. **applyCellBoxes**: finds each phrase's PDF cell (the nearest ruling line on all 4 sides,
    else the smallest coloured box). Text wrapped inside one cell → one cell with `\n`. A label
    centred between rows is moved onto a row its cell covers.
@@ -68,6 +70,10 @@ work happens in the browser.
   "two numbers in one column → split" pass is for.
 - Header/footer "signatures" replace digits with `#`, so different total rows can look identical.
   Lines containing $ or % values are therefore never treated as headers/footers.
+- Long text that runs right up to the next column (gap < 0.45em) used to be joined into one phrase;
+  on enough rows that bridged the column gap and merged two columns (Lyme "Owner"+"Map Lot Sub",
+  "Location"+"Use"). Hence the column-start check in `groupLines`. It only blocks edges that are
+  *usually* apart, so a house number right before its street name still joins.
 - Don't use `Math.max(...array)` on per-chunk lists: it throws past roughly 100k elements.
 - ExcelJS reading back a default font reports `{theme: 1}` as its colour; that isn't white text.
 - Only the **top-left** cell of a merge carries the value and style.
@@ -101,6 +107,8 @@ node e2e.js <pdf> [...]        # real headless Chrome from file://, includes OCR
 - `ERP Pro Expenditure Report 11-10-26.pdf`: 13 pages; repeated headers/footers, two-line records
 - `13-2025-2026 Town-To CRF .pdf`: Excel export; full ruling grid, fills, merged headers, red
   text, indented labels
+- `~/github/TaxFairness/RawData/lyme-2026-notice-of-preliminary-value-list-1094-by-owner.pdf`:
+  19-page property list, no ruling lines; long owner names / locations touch the next column
 
 **Regression habit:** before changing layout code, dump each sample with `run.js` to a text file;
 after the change, dump again and `diff`. Every change in this tool was checked that way.
@@ -119,3 +127,4 @@ after the change, dump again and `diff`. Every change in this tool was checked t
 10. **Version 1.0.2**: code-review fixes: lines with $/% values are never dropped as headers/footers
     (two pages ending in similar "Fund N Total:" rows used to lose both); no `Math.max(...hugeArray)`
     in column detection (crashed on very large PDFs)
+11. **Version 1.0.3**: don't join phrases across a column start (long owner names/locations merged two columns)
