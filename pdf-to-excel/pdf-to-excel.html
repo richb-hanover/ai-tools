@@ -53,7 +53,7 @@
 <body>
 <main>
   <h1>PDF → Excel</h1>
-  <p class="sub">Drop a PDF to convert it to an .xlsx that follows the PDF's layout. <b>Everything runs in this browser;</b> the file never leaves your computer.<span class="version"><em>Version 1.0.3</em></span></p>
+  <p class="sub">Drop a PDF to convert it to an .xlsx that follows the PDF's layout. <b>Everything runs in this browser;</b> the file never leaves your computer.<span class="version"><em>Version 1.0.4</em></span></p>
 
   <div id="drop" tabindex="0" role="button" aria-label="Drop a PDF here or click to choose one">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -83,7 +83,7 @@
 "use strict";
 
 // The one place the version lives: shown on the page and in each workbook's disclaimer row.
-const APP_VERSION = "1.0.3";
+const APP_VERSION = "1.0.4";
 const DISCLAIMER_URL = "https://richb-lyme.com/converting-pdfs-to-excel/";
 const DISCLAIMER = "Disclaimer: This automated conversion from PDF to Excel may have errors. " +
   `${DISCLAIMER_URL} (Version ${APP_VERSION})`;
@@ -484,19 +484,26 @@ function groupLines(items) {
   // stands apart from it, a chunk that runs up close on a few rows (a long name) is not joined
   // across it, or the two columns would merge. Edges that are usually close (a house number
   // right before its street name) keep joining.
-  const edges = new Map(); // rounded x0 -> { n: chunks starting there, near: of those, close to the previous chunk }
+  // Also counts, per edge, words that follow a value closely ("180,130 cu"): such an edge is a
+  // notes column, so a bare integer before it ("63 cu") is split off too.
+  const startsWord = c => /^\p{L}/u.test(c.text.trim());
+  const edges = new Map(); // rounded x0 -> { n: chunks starting there, near: close to the previous chunk, note: words after a value }
   for (const line of lines) {
     line.chunks.sort((a, b) => a.x0 - b.x0);
     line.chunks.forEach((c, k) => {
       const key = Math.round(c.x0);
-      const e = edges.get(key) || { n: 0, near: 0 };
+      const e = edges.get(key) || { n: 0, near: 0, note: 0 };
       edges.set(key, e);
       e.n++;
       const p = line.chunks[k - 1];
-      if (p && c.x0 - p.x1 < 0.45 * Math.max(p.size, c.size)) e.near++;
+      if (p && c.x0 - p.x1 < 0.45 * Math.max(p.size, c.size)) {
+        e.near++;
+        if (isValue(p.text) && startsWord(c)) e.note++;
+      }
     });
   }
   const columnStart = c => { const e = edges.get(Math.round(c.x0)); return e.n >= 5 && e.near < 0.5 * e.n; };
+  const noteColumn = c => edges.get(Math.round(c.x0)).note >= 2;
   for (const line of lines) {
     const merged = [];
     for (const c of line.chunks) {
@@ -505,7 +512,12 @@ function groupLines(items) {
         const gap = c.x0 - prev.x1;
         const sz = Math.max(prev.size, c.size);
         const lonePrefix = /^\(?-?\$$/.test(prev.text.trim()) && /^[\d(.,]/.test(c.text.trim()) && gap < 12 * sz;
-        const close = gap < 0.45 * sz && !columnStart(c) && prev.bold === c.bold && prev.color === c.color && !(isValue(prev.text) && isValue(c.text));
+        // A value is never joined to another value, nor to words after it ("180,130 cu"): the words
+        // are a separate field. Bare integers aren't values, so "2 MAIN ST" still joins, unless
+        // the words start in a notes column ("63 cu").
+        const afterValue = isValue(prev.text) ? isValue(c.text) || startsWord(c)
+          : /^\d+$/.test(prev.text.trim()) && startsWord(c) && noteColumn(c);
+        const close = gap < 0.45 * sz && !columnStart(c) && !afterValue && prev.bold === c.bold && prev.color === c.color;
         if (lonePrefix || close) {
           const sp = lonePrefix || gap < 0.12 * sz || /\s$/.test(prev.text) || /^\s/.test(c.text) ? "" : " ";
           prev.text = (prev.text + sp + c.text).replace(/\s+/g, " ").trim();

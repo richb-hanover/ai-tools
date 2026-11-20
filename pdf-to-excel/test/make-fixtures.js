@@ -1,6 +1,8 @@
 // Builds the synthetic test PDFs in fixtures/:
 //   Merged Table.pdf  - rowspan/colspan, fills, white-on-dark header, wrapped header text
 //                       (rendered by Chrome from fixtures/merged-table.html)
+//   Notes Column.pdf  - position-only report: long names touching the next column, amounts
+//                       with an optional trailing "cu" note (rendered from fixtures/notes-column.html)
 //   Scanned.pdf       - image-only copy of Merged Table.pdf, to exercise OCR
 //                       (needs poppler's pdftoppm: `brew install poppler`; uses macOS `sips`)
 const puppeteer = require("puppeteer-core");
@@ -15,8 +17,11 @@ const fx = path.join(__dirname, "fixtures");
   const page = await browser.newPage();
   await page.goto("file://" + path.join(fx, "merged-table.html"));
   await page.pdf({ path: path.join(fx, "Merged Table.pdf"), format: "letter", printBackground: true });
-  await browser.close();
   console.log("wrote fixtures/Merged Table.pdf");
+  await page.goto("file://" + path.join(fx, "notes-column.html"));
+  await page.pdf({ path: path.join(fx, "Notes Column.pdf"), format: "letter" });
+  await browser.close();
+  console.log("wrote fixtures/Notes Column.pdf");
 
   const png = path.join(fx, "scan-page");
   execFileSync("pdftoppm", ["-r", "150", "-png", "-singlefile", path.join(fx, "Merged Table.pdf"), png]);

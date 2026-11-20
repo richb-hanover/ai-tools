@@ -24,7 +24,8 @@ work happens in the browser.
 | PDF borders **not** copied | User's choice: Excel gridlines do the job. Ruling lines are still *read*, to find cells and columns. |
 | Output name `name.pdf.xlsx` (not `name.xlsx`) | User's choice. |
 | Last row of every workbook: gray disclaimer with the blog link and version (`DISCLAIMER`) | User's choice. The whole cell is a hyperlink to the blog post (Excel links are per cell), styled as plain text. Added after column sizing so it doesn't widen column A. |
-| No special cases for one document's quirks (e.g. Lyme's `180,130 cu` stays text) | User's choice: keep the converter general purpose. A value with a trailing note isn't a number. |
+| No special cases for one document's quirks | User's choice: keep the converter general purpose. |
+| Words right after a value are a separate field (`180,130 cu` → number + `cu` column) | User's choice: the Lyme "cu" (current use) notes are common enough to deserve a column. Limited to values (comma, decimal, `$`, `%`) and to bare integers before a notes column, so house numbers still join street names. Small notes-column integers (`63`) stay text. |
 | Version kept in `APP_VERSION` (CORE) | One place to bump; the page label and the disclaimer row read it. |
 
 ## Pipeline (all inside `// CORE-START … // CORE-END` in the HTML)
@@ -38,8 +39,11 @@ work happens in the browser.
    - stroked segments = ruling lines
    - text runs + fill colour = **text colour** (PDF.js text content has no colour)
 4. **groupLines**: items → visual lines (by baseline) → phrases (joined when the gap is < 0.45em;
-   never two numbers; a lone `$` joins the number after it; never across a **column start**,
-   i.e. an x where ≥ 5 chunks on the page begin and the text before it is usually *not* close).
+   a lone `$` joins the number after it; never across a **column start**, i.e. an x where ≥ 5
+   chunks on the page begin and the text before it is usually *not* close). A value never joins
+   another value or the words after it (`180,130 cu` → `180,130` | `cu`); a bare integer joins
+   the words after it (`2 MAIN ST`) unless they start in a **notes column**, an x where ≥ 2 words
+   on the page follow a value (`63 cu` → `63` | `cu`).
 5. **applyCellBoxes**: finds each phrase's PDF cell (the nearest ruling line on all 4 sides,
    else the smallest coloured box). Text wrapped inside one cell → one cell with `\n`. A label
    centred between rows is moved onto a row its cell covers.
@@ -74,6 +78,10 @@ work happens in the browser.
   on enough rows that bridged the column gap and merged two columns (Lyme "Owner"+"Map Lot Sub",
   "Location"+"Use"). Hence the column-start check in `groupLines`. It only blocks edges that are
   *usually* apart, so a house number right before its street name still joins.
+- A bare integer before a notes column (`63 cu`) used to stay joined; sticking out over the new
+  `cu` column it was then merged across both columns and centred. Hence the notes-column check.
+- Chrome-rendered fixtures: `letter-spacing` or `word-spacing` makes Chrome drop the space glyphs
+  (words run together in the text layer). Position columns instead of stretching text.
 - Don't use `Math.max(...array)` on per-chunk lists: it throws past roughly 100k elements.
 - ExcelJS reading back a default font reports `{theme: 1}` as its colour; that isn't white text.
 - Only the **top-left** cell of a merge carries the value and style.
@@ -93,7 +101,7 @@ work happens in the browser.
 ```
 cd pdf-to-excel/test
 npm install                 # pdfjs-dist, exceljs, puppeteer-core (uses installed Chrome)
-node make-fixtures.js       # builds fixtures/Merged Table.pdf + fixtures/Scanned.pdf
+node make-fixtures.js       # builds fixtures/Merged Table.pdf, Notes Column.pdf, Scanned.pdf
 node run.js <pdf> [--rows N]   # fast: CORE in Node, dumps the sheet (no OCR)
 node e2e.js <pdf> [...]        # real headless Chrome from file://, includes OCR + download
 ```
@@ -128,3 +136,5 @@ after the change, dump again and `diff`. Every change in this tool was checked t
     (two pages ending in similar "Fund N Total:" rows used to lose both); no `Math.max(...hugeArray)`
     in column detection (crashed on very large PDFs)
 11. **Version 1.0.3**: don't join phrases across a column start (long owner names/locations merged two columns)
+12. **Version 1.0.4**: words right after a value become their own column (Lyme `180,130 cu`); new fixture
+    `Notes Column.pdf` (long names touching the next column + a notes column)
